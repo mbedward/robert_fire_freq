@@ -1,0 +1,719 @@
+---
+title: "Fire frequency - recalcitrant carbon"
+output:
+  word_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(mxbutils)
+
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(stringr)
+
+library(rjags)
+load.module("glm")
+
+set.seed(1234)
+
+# short-cut functions for quantiles
+lwr <- function(x) quantile(x, probs=0.025)
+upr <- function(x) quantile(x, probs=0.975)
+
+# Set to FALSE to run model from scratch or FALSE to 
+# load previous model outputs
+RUN.MODEL <- FALSE
+
+
+# ggplot bits
+t <- theme_bw() +
+  theme(text = element_text(size = 16))
+
+theme_set(t)
+
+```
+
+
+```{r}
+
+DAT <- loadFrom(mdPath("data/firefreq_rpc.RData"))
+
+# ensure "O" (open) microsite is the reference level
+DAT <- DAT %>%
+  mutate(microsite = relevel(microsite, "O"))
+
+
+if (!RUN.MODEL) {
+  path <- mdPath("model_outputs")
+
+  # Load model predictions from earlier run
+  # (if more than 1 file take the last which should be most recent)
+  f <- tail( dir(path, pattern="rpc_model_predictions.*RData$", full.names = TRUE), 1)
+  M.predicted <- loadFrom(f)
+
+  # Load model parameter samples
+  f <- tail( dir(path, pattern="rpc_model_parameters.*RData$", full.names = TRUE), 1)
+  m.sims <- loadFrom(f)
+}
+
+
+```
+
+
+```{r}
+
+# Function which takes an mcmc object generated with coda.samples
+# and calculates a summary data frame of rates of inclusion and 
+# coefficient values for each predictor.
+#
+# m - matrix of MCMC samples extracted from model outputs. It is 
+#     assumed to have a set of columns for coefficient samples and
+#     a matching set of columns for the corresponding binary indicator
+#     variables.
+#
+makeVarSummary <- function(m, indicator.prefix = "^ind_") {
+  
+  indicator.cols <- which( str_detect(colnames(m), indicator.prefix) )
+  var.names <- str_replace(colnames(m)[indicator.cols], indicator.prefix, "")
+  var.cols <- match(var.names, colnames(m))
+  
+  if (anyNA(var.cols)) stop("Unmatched column names")
+  
+  Nterms <- length(var.cols)
+  
+  # Rate of variable inclusion
+  var.inclusion <- apply(m[, indicator.cols], 2, mean)
+  
+  # Coefficient values: included and overall
+  var.coefs <-
+    sapply(1:Nterms, 
+           function(i) {
+             x <- m[, var.cols[i]]
+             ind <- m[, indicator.cols[i]]
+             
+             x.in <- x[ ind == 1 ]
+             if (length(x.in) == 0) c(0, 0, 0, 0, FALSE)
+             else {
+               qs <- quantile(x.in, probs=c(0.025, 0.975))
+               non.zero <- sign(qs[1]) != 0 & sign(qs[1]) == sign(qs[2])
+               c(mean(x.in), mean(x), qs, non.zero)
+             }
+           })
+  
+  # Create output data frame
+
+  var.summary <- data.frame(
+    Variable = var.names,
+    PercentInclusion = 100 * var.inclusion,
+    MeanIncluded = var.coefs[1, ],
+    MeanOverall = var.coefs[2, ],
+    Lower = var.coefs[3, ],
+    Upper = var.coefs[4, ],
+    NonZero = var.coefs[5, ],
+    stringsAsFactors = FALSE
+  )
+  
+  arrange(var.summary, desc(PercentInclusion))
+}
+
+```
+
+
+
+```{r}
+
+# We generate data sets even if not running the model because they
+# can be useful for summaries etc
+
+
+# First create a data frame of digest values where rows are samples 
+# (sampleIndex in DAT) and cols are digest reps. Give missing digest 
+# reps NA values.
+#
+yobs <- DAT %>% 
+  select(sampleIndex, digestPercentC) %>%
+  mutate(logRecalC = log10(digestPercentC)) %>%
+  group_by(sampleIndex) %>% 
+  mutate(digestRep = row_number()) %>% 
+  ungroup() %>%
+  dcast(sampleIndex ~ digestRep, value.var = "logRecalC")
+
+# Predictor data thinned to one record per field sample
+DAT.thinned <- DAT %>%
+  select(sampleIndex, regionCode, depth, microsite, firefreq, predigestPercentC) %>%
+  distinct(sampleIndex, .keep_all = TRUE) %>%
+  mutate(logInitC = log10(predigestPercentC))
+
+# Put predictor data in same order as yobs data frame
+DAT.thinned <- left_join(select(yobs, sampleIndex), DAT.thinned)
+
+X.formula <- formula(~ logInitC * regionCode * depth +
+                       regionCode * depth * firefreq +
+                       regionCode * microsite * firefreq)
+
+# Model matrix for regression
+X <- model.matrix(X.formula, data = DAT.thinned)
+Nterms <- ncol(X)
+
+
+# Constraint matrix on variable inclusion
+X.constraints <- matrix(0, nrow=Nterms, ncol=Nterms)
+term.names <- colnames(X)
+rownames(X.constraints) <- term.names
+colnames(X.constraints) <- term.names
+
+# This recursive function takes a constraint matrix row index
+# and a term name and updates the matrix for inclusion of the
+# relevant component terms.
+#
+setConstraint <- function(X.constraints, row.index, term.name) {
+  if (is.null(term.name)) {
+    term.name <- term.names[row.index]
+    term.index <- row.index
+  } else {
+    term.index <- match(term.name, term.names)
+  }
+  
+  X.constraints[row.index, term.index] <- 1
+  
+  torder <- 1 + str_count(term.name, "\\:")
+  
+  if (torder > 1) {
+    components <- combn( unlist( str_split(term.name, "\\:")), torder-1 )
+    components <- apply(components, 2, paste, collapse=":")
+    
+    for (component in components) {
+      X.constraints <- setConstraint(X.constraints, row.index, component)
+    }
+  }
+  
+  X.constraints
+}
+
+# Run the function to populate the constraint matrix.
+#
+for (i in 1:Nterms) {
+  X.constraints <- setConstraint(X.constraints, i, NULL)
+}
+
+
+# Data and model matrix for posterior predictions.
+# This has one row for each of the 54 possible combinations
+# of the factor predictors (3 regions x 2 depths x 3 microsites x 3 fire frequencies).
+#
+DAT.predict <- DAT.thinned %>%
+  select(regionCode, depth, microsite, firefreq) %>%
+  distinct()
+
+Carbon.predict <- DAT.thinned %>%
+  group_by(regionCode, depth, microsite, firefreq) %>%
+  summarize(logInitC = log10( mean(predigestPercentC) ))
+
+DAT.predict <- left_join(DAT.predict, Carbon.predict, 
+                         by=c("regionCode", "depth", "microsite", "firefreq"))
+
+X.predict <- model.matrix(X.formula, data = DAT.predict)
+
+```
+
+
+```{r, eval = RUN.MODEL}
+
+modelTxt <- "
+  model {
+
+    ############################################################
+    # First step - infer 'true' value of recalcitrant carbon for
+    # each field sample via t-distributions. 
+    ############################################################
+
+    for (i in 1:N) {
+      for (j in 1:Ndigest) {
+        yobs[i, j] ~ dt(ytrue[i], sd.digest^(-2), nu)
+      }
+    }
+
+    sd.digest ~ dunif(0, 10)
+    
+    nuMinusOne ~ dexp(1 / 29.0)
+    nu <- nuMinusOne + 1
+
+
+    ###################################################
+    # Second step - relate 'true' values to predictors.
+    ###################################################
+
+    for (i in 1:N) { 
+      ytrue[i] ~ dnorm(mu[i], sigma^(-2)) 
+    }
+
+    # calculation of mean responses
+    mu <- X %*% beta
+
+    # Predictor inclusion: first draw unconstrained values
+    for (i in 1:Nterms) {
+      indDash[i] ~ dbern(p.ind)
+    }
+
+    # Predictor inclusion: now apply constraints to ensure
+    # interaction terms are accompanied by their component terms
+    # (note >0 test to reduce all non-zero terms to 1)
+    ind <- (indDash %*% X.constraints) > 0
+
+    # Predictor inclusion: finally apply indicators to 
+    # coefficients
+    for (i in 1:Nterms) {
+      betaDash[i] ~ dnorm(0, sigma.ind^(-2))
+      beta[i] <- betaDash[i] * ind[i]
+    }
+
+    p.ind ~ dbeta(1, 1)
+
+    # Prior on common standard deviation of field samples
+    sigma ~ dunif(0, 10)
+
+    # Prior on standard deviation for variable inclusion
+    sigma.ind ~ dunif(0, 10)
+    
+    ###########################################
+    # Posterior predictions
+    ###########################################
+    
+    mu.predict <- X.predict %*% beta
+    
+    for (i in 1:Npredict) { 
+      ypredict[i] ~ dnorm(mu.predict[i], sigma^(-2)) 
+    }  
+  
+  }
+"
+
+zz <- textConnection(modelTxt)
+
+model <- jags.model(zz, 
+                    
+                    data=list(yobs = yobs, 
+                              X = X,
+                              X.constraints = X.constraints,
+                              N=nrow(yobs), 
+                              Ndigest=ncol(yobs),
+                              Nterms = Nterms,
+                              X.predict = X.predict,
+                              Npredict = nrow(X.predict)),
+                    
+                    inits = function(...) {
+                      list(
+                        ytrue = rep(0, nrow(yobs)),
+                        sd.digest = runif(1, 0, 1),
+                        nuMinusOne = runif(1, 1, 20),
+                        betaDash = runif(Nterms, -1, 1), 
+                        sigma = runif(1, 0.1, 10),
+                        sigma.ind = runif(1, 0.1, 10),
+                        p.ind = runif(1, 0.25, 0.75),
+                        indDash = rep(0, Nterms),
+                        ypredict = rep(0, nrow(X.predict)) )
+                      }, 
+                    
+                    n.chains = 1)
+
+close(zz)
+
+update(model, 50000)
+
+sims <- coda.samples(model, 
+                     c("ytrue", "nu", "sd.digest", "beta", "ind", "p.ind", "ypredict"), 
+                     n.iter=100000, 
+                     thin=10)
+
+
+# Extract two matrices from the MCMC output object:
+# - matrix of model parameter samples
+# - matrix of posterior predictions joined to prediction case data
+#
+m.sims <- as.matrix(sims[[1]])
+rm(sims)
+gc()
+ii.predict <- str_detect(colnames(m.sims), "^ypredict")
+M.predicted <- m.sims[, ii.predict]
+
+
+# Transpose the matrix of predictions and join it to the
+# predict case data
+M.predicted <- t(M.predicted)
+M.predicted <- cbind(DAT.predict, M.predicted)
+
+
+# Save this matrix to the outputs dir so that we don't have to
+# run the model everytime we've cleared out the workspace.
+#
+time <- format(Sys.time(), "%Y-%m-%d-%H-%M")
+path <- mdPath("model_outputs")
+
+save(M.predicted, 
+     file = paste0(file.path(path, "rpc_model_predictions_"), time, ".RData"))
+
+# Separately save the matrix of samples for other variables.
+# We change 'beta' and 'ind' column names to names of predictors in X
+# to make subsequent use easier, and get rid of pesky square brackets 
+# in the remaining column names.
+
+ii.beta <- str_detect(colnames(m.sims), "^beta\\[")
+colnames(m.sims)[ii.beta] <- colnames(X)
+
+ii.ind <- str_detect(colnames(m.sims), "^ind\\[")
+colnames(m.sims)[ii.ind] <- paste("ind", colnames(X), sep="_")
+
+# purge brackets from column names
+colnames(m.sims) <- str_replace_all(colnames(m.sims), "\\[|\\(|\\]|\\)", "")
+
+save(m.sims[, !ii.predict],
+     file = paste0(file.path(path, "rpc_model_parameters_"), time, ".RData"))
+
+```
+
+
+## Variable importance
+
+```{r}
+# Generate summary of percent inclusion and coefficient values for predictors
+varimp <- makeVarSummary(m.sims)
+knitr::kable(varimp, digits=4)
+
+path <- file.path(mdPath("model_outputs"), "rpcarbon_varimp.csv")
+write.csv(varimp, file = path, row.names = FALSE)
+
+```
+
+
+```{r}
+
+# Column indices of predicted values in M.predicted
+predict.cols <- (ncol(DAT.predict) + 1):ncol(M.predicted)
+
+```
+
+
+## Model predictions by depth, region
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "depth"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+ggplot(data = dat) + 
+  geom_density(aes(x = value, colour = regionCode),
+               size = 1) +
+  
+  scale_colour_discrete(name = "Region") +
+  
+  scale_x_log10() +
+  
+  labs(x = "%RPC") +
+  
+  facet_wrap(~ depth, ncol=1)
+
+# Tabular summary of the above predictions
+
+x <- dat %>%
+  group_by(depth, regionCode) %>%
+  summarize(
+    mean = mean(value),
+    lwr = lwr(value),
+    upr = upr(value))
+
+knitr::kable(x, digits=2)
+
+```
+
+# Model predictions by depth, fire frequency
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("firefreq", "depth"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+ggplot(data = dat) + 
+  geom_density(aes(x = value, colour = firefreq),
+               size = 1) +
+  
+  scale_colour_discrete(name = "Fire frequency") +
+  scale_x_log10() +
+  
+  labs(x = "%RPC") +
+  
+  facet_wrap(~ depth, ncol=1)
+
+
+# Tabular summary of the above predictions
+
+x <- dat %>%
+  group_by(depth, firefreq) %>%
+  summarize(
+    mean = mean(value),
+    lwr = lwr(value),
+    upr = upr(value))
+
+knitr::kable(x, digits=2)
+
+```
+
+
+## Model predictions by depth, region, fire frequency
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "firefreq", "depth"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+ggplot(data = dat) + 
+  geom_density(aes(x = value, colour = firefreq),
+               size = 1) +
+  
+  scale_colour_discrete(name = "Fire frequency") +
+  scale_x_log10() +
+  
+  labs(x = "%RPC") +
+  facet_grid(regionCode ~ depth)
+
+
+# Tabular summary of the above predictions
+
+x <- dat %>%
+  group_by(regionCode, depth, firefreq) %>%
+  summarize(
+    mean = mean(value),
+    lwr = lwr(value),
+    upr = upr(value))
+
+knitr::kable(x, digits=2)
+
+
+```
+
+
+## Model predictions by depth, region, micro-site, fire frequency
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "microsite", "depth", "firefreq"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+ggplot(data = dat) + 
+  geom_density(aes(x = value, colour = firefreq),
+               size = 1) +
+  
+  scale_colour_discrete(name = "Fire frequency") +
+  scale_x_log10() +
+  
+  labs(x = "%RPC") +
+  facet_grid(regionCode + microsite ~ depth)
+
+
+# Tabular summary of the above predictions
+
+x <- dat %>%
+  group_by(regionCode, depth, microsite, firefreq) %>%
+  summarize(
+    mean = mean(value),
+    lwr = lwr(value),
+    upr = upr(value))
+
+knitr::kable(x, digits=2)
+
+```
+
+
+## Graph of means and intervals corresponding to above full-breakdown table
+
+```{r}
+
+ggplot(data = x) +
+  geom_errorbar(aes(x = firefreq, group = microsite, ymin = lwr, ymax = upr),
+                width = 0.5,
+                position = position_dodge(width = 0.7)) +
+  
+  geom_point(aes(x = firefreq, y = mean, shape = microsite), 
+             size = 3,
+             position = position_dodge(width = 0.7)) +
+  
+  scale_shape(name = "micro-site", 
+              breaks = c("O", "R", "S"),
+              labels = c("open", "rough", "smooth")) +
+  
+  labs(x = "Fire frequency", y = "%RPC") +
+  
+  facet_grid(depth ~ regionCode)
+
+```
+
+
+## Table of mean differences between fire frequencies within region, depth and micro-site
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "firefreq", "depth", "microsite"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+dat <- dcast(dat, 
+             regionCode + depth + microsite + variable ~ firefreq, 
+             value.var = "value")
+
+colnames(dat)[5:7] <- paste("ff", colnames(dat)[5:7], sep="")
+
+# calculate pairwise differences in predictions between fire frequencies
+dat <- mutate(dat, 
+              ff2_1 = ff2 - ff1,
+              ff4_1 = ff4 - ff1, 
+              ff4_2 = ff4 - ff2) 
+
+# summarize mean differences
+dat <- dat %>% 
+  group_by(regionCode, depth, microsite) %>% 
+  summarize_each(funs(mean, lwr, upr), 8:10)
+
+# arrange cols a bit better
+dat <- select(dat, regionCode, depth, microsite,
+              ff2_1_mean, ff2_1_lwr, ff2_1_upr,
+              ff4_1_mean, ff4_1_lwr, ff4_1_upr,
+              ff4_2_mean, ff4_2_lwr, ff4_2_upr)
+
+knitr::kable(dat, digits=2)
+
+```
+
+## Region differences
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "firefreq", "depth", "microsite"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+dat <- dcast(dat, 
+             depth + microsite + firefreq + variable ~ regionCode, 
+             value.var = "value")
+
+# calculate pairwise differences between regions
+dat <- dat %>% 
+  mutate(IW_WC = IW - WC,
+         IW_WW = IW - WW,
+         WC_WW = WC - WW)
+
+# summarize mean differences (results in single row data frame)
+deltas <- dat %>%
+  group_by(depth) %>%
+  summarize_each(funs(mean, lwr, upr), 8:10)
+
+# munge into a more compact format
+deltas <- deltas %>%
+  melt(id.vars="depth") %>%
+  mutate(regions = str_sub(variable, 1, 5),
+         stat = str_extract(variable, "[a-z]+$"))
+
+deltas <- dcast(deltas, regions + depth ~ stat) %>%
+  select(regions, depth, mean, lwr, upr)
+
+knitr::kable(deltas, digits=2)
+
+```
+
+
+## Fire frequency differences within depth within region
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "firefreq", "depth", "microsite"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+dat <- dcast(dat, 
+             regionCode + depth + microsite + variable ~ firefreq, 
+             value.var = "value")
+
+# fix fire freq col names
+ii <- str_detect(colnames(dat), "^\\d$")  # find integer names
+colnames(dat)[ii] <- str_c("ff", colnames(dat)[ii])
+
+# calculate pairwise differences between fire frequencies within depth within region
+dat <- dat %>%
+  group_by(regionCode, depth) %>%
+  mutate(ff2_1 = ff2 - ff1,
+         ff4_1 = ff4 - ff1,
+         ff4_2 = ff4 - ff2)
+
+# summarize differences
+deltas <- dat %>% 
+  summarize_each(funs(mean, lwr, upr), 8:10)
+
+# arrange cols
+deltas <- deltas %>%
+  select(region = regionCode, depth,
+         ff2_1_mean, ff2_1_lwr, ff2_1_upr,
+         ff4_1_mean, ff4_1_lwr, ff4_1_upr,
+         ff4_2_mean, ff4_2_lwr, ff4_2_upr)
+
+knitr::kable(deltas, digits=2)
+
+```
+
+
+## Fire frequency differences
+
+```{r}
+
+dat <- melt(M.predicted, 
+            id.vars = c("regionCode", "firefreq", "depth", "microsite"), 
+            measure.vars = predict.cols) %>%
+  mutate(value = 10^value)
+
+dat <- dcast(dat, 
+             regionCode + depth + microsite + variable ~ firefreq, 
+             value.var = "value")
+
+# Fix fire freq col names
+colnames(dat)[5:7] <- paste("ff", colnames(dat)[5:7], sep="")
+
+# calculate pairwise differences between regions
+dat <- mutate(dat,
+              ff2_1 = ff2 - ff1,
+              ff4_1 = ff4 - ff1,
+              ff4_2 = ff4 - ff2)
+
+# summarize mean differences (results in single row data frame)
+deltas <- dat %>% 
+  group_by(depth) %>%
+  summarize_each(funs(mean, lwr, upr), 8:10)
+
+# munge into a more compact format
+deltas <- deltas %>%
+  melt(id.vars="depth") %>%
+  mutate(freqs = str_sub(variable, 1, 5),
+         stat = str_extract(variable, "[a-z]+$"))
+
+deltas <- dcast(deltas, freqs + depth ~ stat) %>%
+  select(freqs, depth, mean, lwr, upr)
+
+knitr::kable(deltas, digits=2)
+
+```
+
+

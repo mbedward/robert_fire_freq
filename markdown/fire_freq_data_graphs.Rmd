@@ -1,0 +1,132 @@
+---
+title: "Soil carbon - fire frequency"
+output:
+  word_document:
+    fig_height: 8
+    fig_width: 8
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+library(mxbutils)
+
+library(dplyr)
+library(ggplot2)
+
+DAT.totalc <- loadFrom(mdPath("data/firefreq_totalc.RData"))
+DAT.rpc <- loadFrom(mdPath("data/firefreq_rpc.RData"))
+
+## ggplot bits
+
+t <- theme_bw() +
+  theme(text = element_text(size = 24))
+
+theme_set(t)
+
+PointSize <- 3
+
+```
+
+
+## Initial carbon
+
+Distribution of percent initial carbon values for the depth and fire frequency categories
+for which recalcitrant carbon has been assayed.
+
+Horizontal lines indicate mean percent carbon value for each depth.
+
+
+```{r}
+
+dat <- DAT.totalc %>%
+  filter(firefreq %in% c("1", "2", "4")) %>%
+  filter(depth %in% c("0-5cm", "6-13cm"))
+
+meanPercentC <- tapply(dat$percentC, dat$depth, mean, na.rm=TRUE)
+
+ggplot(data = dat) + 
+  geom_violin(aes(firefreq, percentC), 
+              fill = "grey90") + 
+  
+  geom_point(aes(firefreq, percentC, colour = microsite), 
+             size = PointSize, 
+             position = position_jitter(width = 0.15, height = 0)) + 
+  
+  geom_abline(aes(intercept = meanPercentC[depth]), 
+              slope = 0, colour = "brown", size = 1.5) + 
+  
+  labs(x = "Fire frequency", y = "%CTot") +
+  
+  facet_grid(depth ~ regionCode)
+
+
+```
+
+
+## Recalcitrant carbon value
+
+Distribution of recalcitrant carbon values, calculated as mean of replicate digest values.
+
+Horizontal lines indicate mean value for whole dataset.
+
+
+```{r}
+
+dat <- DAT.rpc %>%
+  group_by(regionCode, depth, microsite, firefreq, replicate) %>% 
+  summarize(digestPercentC = mean(digestPercentC, na.rm=TRUE))
+
+meanPercentC <- tapply(dat$digestPercentC, dat$depth, mean, na.rm=TRUE)
+
+ggplot(data = dat) + 
+  geom_violin(aes(firefreq, digestPercentC), 
+              fill="grey90") + 
+  
+  geom_point(aes(firefreq, digestPercentC, colour = microsite), 
+             size = PointSize, 
+             position = position_jitter(width=0.15, height=0)) +
+  
+  labs(x = "Fire frequency", y = "%RPC") +
+  
+  facet_grid(depth ~ regionCode)
+
+```
+
+
+## Recalcitrant carbon proportion
+
+Distribution of recalcitrant carbon proportion values, calculated as mean of replicate digest values over initial carbon value.
+
+Horizontal lines indicate mean proportion for whole dataset.
+
+
+```{r}
+
+dat <- DAT.rpc %>%
+  group_by(regionCode, depth, microsite, firefreq, replicate) %>% 
+  
+  summarize(digestPercentC = mean(digestPercentC, na.rm=TRUE), 
+            predigestPercentC = first(predigestPercentC)) %>%
+  
+  mutate(recalProp = digestPercentC / predigestPercentC)
+
+
+ggplot(data = dat) + 
+  geom_violin(aes(firefreq, recalProp), 
+              fill = "grey90") +
+  
+  geom_point(aes(firefreq, recalProp, colour = microsite), 
+             size = PointSize, 
+             position = position_jitter(width=0.15, height=0)) +
+  
+  labs(x = "Fire frequency", y = "Prop RPC") +
+  
+  facet_grid(depth ~ regionCode)
+
+
+```
+
+

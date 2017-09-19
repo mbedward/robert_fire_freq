@@ -1,0 +1,110 @@
+---
+title: "Carbon - nitrogen ratio in relation to region and fire frequency"
+output:
+  word_document: 
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(dplyr)
+library(ggplot2)
+library(here)
+library(stringr)
+
+# load DAT_CN data frame
+load(here("data", "firefreq_CNratio.RData"))
+
+lwr <- function(x) quantile(x, prob = 0.025)
+upr <- function(x) quantile(x, prob = 0.975)
+
+theme_set( theme_bw() + theme(text = element_text(size = 18)))
+
+```
+
+
+## Summary statistics by region
+
+Means and 95% bounds of observed data for top 5cm samples:
+
+```{r}
+
+dat <- DAT_CN %>%
+  filter(depth == "0-5cm") %>%
+  
+  group_by(regionCode) %>%
+  
+  summarize(lwr = lwr(CNratio),
+            mean = mean(CNratio),
+            upr = upr(CNratio))
+
+knitr::kable(dat, digits = 2)
+
+```
+
+Distribution of values for top 5cm samples:
+
+```{r}
+
+dat <- filter(DAT_CN, depth == "0-5cm")
+
+ggplot(data = dat) +
+  geom_histogram(aes(x = CNratio, y = ..density..), binwidth = 5,
+                 colour = "black", fill = "grey80") +
+  
+  scale_x_continuous(breaks = c(25, 50, 75)) +
+  
+  labs(x = "carbon:nitrogen ratio") +
+  
+  facet_wrap(~ regionCode)
+
+```
+
+
+## Summary statistics by region and fire frequency
+
+Means and 95% bounds of observed data for top 5cm samples:
+
+```{r}
+
+dat <- DAT_CN %>%
+  filter(depth == "0-5cm") %>%
+  
+  group_by(regionCode, firefreq) %>%
+  
+  summarize(lwr = lwr(CNratio),
+            mean = mean(CNratio),
+            upr = upr(CNratio))
+
+knitr::kable(dat, digits = 2)
+
+```
+
+Distribution of values for top 5cm samples:
+
+```{r}
+
+labelfn <- function(labels) {
+  labels %>%
+    str_replace("1", "1 fire") %>%
+    str_replace("(2|3|4)", "\\1 fires")
+}
+
+dat <- filter(DAT_CN, depth == "0-5cm")
+
+ggplot(data = dat) +
+  geom_histogram(aes(x = CNratio, y = ..density..), binwidth = 5,
+                 colour = "black", fill = "grey80") +
+  
+  scale_x_continuous(breaks = c(25, 50, 75, 100)) +
+  
+  labs(x = "carbon:nitrogen ratio") +
+  
+  facet_grid(firefreq ~ regionCode,
+             labeller = as_labeller(labelfn))
+
+```
+

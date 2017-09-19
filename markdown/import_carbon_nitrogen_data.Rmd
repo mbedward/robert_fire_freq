@@ -1,0 +1,158 @@
+---
+title: "Import carbon - nitrogen data"
+author: "Michael Bedward"
+date: "19 September 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+library(here)
+
+```
+
+
+Note: This import was done long after the original carbon data had been imported and analysed. 
+
+## Blackheath data
+
+```{r}
+
+path <- here("data_raw", "Blackheath_total_CNP.xlsx")
+
+dat.bh <- read_excel(path, range = "A3:G111")
+colnames(dat.bh) <- c("site", "microsite", "depth", "name", "weight", "totalNpercent", "totalCpercent")
+
+dat.bh <- tidyr::fill(dat.bh, site)
+
+dat.bh$microsite <- factor(dat.bh$microsite, levels = c("Op", "Ro", "Sm"), labels = c("O", "R", "S"))
+
+# tidy up depth labels, discard >13cm recs, convert to factor
+dat.bh <- dat.bh %>%
+  mutate(depth = ifelse(str_detect(depth, "top"), "0-5cm", depth),
+         depth = ifelse(str_detect(depth, "\\-\\s*13"), "6-15cm", depth),
+         depth = ifelse(str_detect(depth, "\\>"), NA, depth) ) %>%
+  
+  filter(!is.na(depth)) %>%
+  
+  mutate(depth = factor(depth)) %>%
+  
+  # tidy site labels
+  mutate(site = str_replace(site, "fi$", "f1"),
+         site = str_replace(site, "blac", "B"),
+         site = toupper(site)) %>%
+  
+  # fire frequency from site label
+  mutate(firefreq = factor( str_replace(site, "^[A-Z](\\d).*", "\\1") )) %>%
+
+  # subset columns
+  select(site, microsite, depth, firefreq, totalCpercent, totalNpercent)
+
+
+```
+
+
+## Gosford data
+
+```{r}
+
+path <- here("data_raw", "Gos Frequency.xlsx")
+
+dat.gos <- read_excel(path, sheet = 1)
+colnames(dat.gos) <- c("site", "label", "totalCpercent", "totalNpercent")
+
+dat.gos <- dat.gos %>%
+  # microsite from label
+  mutate(microsite = factor(str_sub(str_trim(label), 1, 1))) %>%
+  
+  # depth from label (discard >13cm)
+  mutate(depth = ifelse(str_detect(label, "T"), "0-5cm", 
+                        ifelse(str_detect(label, "5\\s*\\-\\s*13"), "6-15cm", NA))) %>%
+  
+  filter(!is.na(depth)) %>%
+  mutate(depth = factor(depth)) %>%
+  
+  # fire frequency from site label
+  mutate(firefreq = factor( str_replace(site, "^[A-Z](\\d).*", "\\1") )) %>%
+  
+  # subset columns
+  select(site, microsite, depth, firefreq, totalCpercent, totalNpercent)
+
+
+```
+
+
+
+## Kulnura data
+
+```{r}
+
+path <- here("data_raw", "Kuln Frequency.xlsx")
+
+dat.kul <- read_excel(path, sheet = 1, skip = 1)
+
+colnames(dat.kul) <- c("x1", "x2", "site", "label", "totalCpercent", "totalNpercent", "x4", "x5", "x6")
+
+# data arrives with a blank first rec for some reason
+dat.kul <- filter(dat.kul, !is.na(site))
+
+dat.kul <- dat.kul  %>%
+  # microsite from label
+  mutate(microsite = factor(str_sub(str_trim(label), 1, 1))) %>%
+  
+  # depth from label (discard >13cm)
+  mutate(depth = ifelse(str_detect(label, "T"), "0-5cm", 
+                        ifelse(str_detect(label, "5\\s*\\-\\s*13"), "6-15cm", NA))) %>%
+  
+  filter(!is.na(depth)) %>%
+  mutate(depth = factor(depth)) %>%
+  
+  # fire frequency from site label
+  mutate(firefreq = factor( str_replace(site, "^[A-Z](\\d).*", "\\1") )) %>%
+  
+  # fire frequency from site label
+  mutate(firefreq = factor( str_replace(site, "^[A-Z](\\d).*", "\\1") )) %>%
+  
+  # subset columns
+  select(site, microsite, depth, firefreq, totalCpercent, totalNpercent)
+
+
+```
+
+
+
+## Combined data set
+
+Combine region data sets, add region and climate labels, and save to file.
+
+```{r}
+
+lookup <- data.frame(
+  start = c("B", "G", "K"),
+  regionAbbrev = c("blac", "gosf", "kuln"),
+  regionName = c("Blackheath", "Gosford", "Kulnura"),
+  regionCode = c("WC", "WW", "IW")
+)
+
+
+DAT_CN <- rbind(dat.bh, dat.gos, dat.kul) %>%
+  
+  # add region/climate labels
+  mutate(start = str_sub(site, 1, 1)) %>%
+  left_join(lookup, by = "start") %>%
+  
+  select(site, microsite, depth, firefreq, regionAbbrev, regionName, regionCode, totalCpercent, totalNpercent) %>%
+  
+  mutate(CNratio = totalCpercent / totalNpercent)
+
+
+save(DAT_CN, file = here("data", "firefreq_CNratio.RData"))
+
+```
+

@@ -11,7 +11,7 @@ output:
 
 knitr::opts_chunk$set(echo = TRUE)
 
-library(mxbutils)
+library(here)
 
 library(dplyr)
 library(ggplot2)
@@ -38,12 +38,21 @@ t <- theme_bw() +
 
 theme_set(t)
 
+
+load_from <- function(.path) {
+  load(.path)
+  obs <- ls(all.names = FALSE)
+  if (length(obs) == 1) get(obs[1], inherits = FALSE)
+  else if (length(obs) > 1) mget(obs, inherits = FALSE)
+  else NULL
+}
+
 ```
 
 
 ```{r}
 
-DAT <- loadFrom(mdPath("data/firefreq_rpc.RData"))
+DAT <- load_from( here::here("data", "firefreq_rpc.RData") )
 
 # ensure "O" (open) microsite is the reference level
 DAT <- DAT %>%
@@ -51,16 +60,16 @@ DAT <- DAT %>%
 
 
 if (!RUN.MODEL) {
-  path <- mdPath("model_outputs")
+  path <- here::here("model_outputs")
 
   # Load model predictions from earlier run
   # (if more than 1 file take the last which should be most recent)
   f <- tail( dir(path, pattern="rpc_model_predictions.*RData$", full.names = TRUE), 1)
-  M.predicted <- loadFrom(f)
+  M.predicted <- load_from(f)
 
   # Load model parameter samples
   f <- tail( dir(path, pattern="rpc_model_parameters.*RData$", full.names = TRUE), 1)
-  m.sims <- loadFrom(f)
+  m.sims <- load_from(f)
 }
 
 
@@ -354,10 +363,10 @@ M.predicted <- cbind(DAT.predict, M.predicted)
 # run the model everytime we've cleared out the workspace.
 #
 time <- format(Sys.time(), "%Y-%m-%d-%H-%M")
-path <- mdPath("model_outputs")
+path <- "model_outputs"
 
 save(M.predicted, 
-     file = paste0(file.path(path, "rpc_model_predictions_"), time, ".RData"))
+     file = here::here(path, paste0("rpc_model_predictions_", time, ".RData")))
 
 # Separately save the matrix of samples for other variables.
 # We change 'beta' and 'ind' column names to names of predictors in X
@@ -374,7 +383,7 @@ colnames(m.sims)[ii.ind] <- paste("ind", colnames(X), sep="_")
 colnames(m.sims) <- str_replace_all(colnames(m.sims), "\\[|\\(|\\]|\\)", "")
 
 save(m.sims[, !ii.predict],
-     file = paste0(file.path(path, "rpc_model_parameters_"), time, ".RData"))
+     file = here::here(path, paste0("rpc_model_parameters_", time, ".RData")))
 
 ```
 
@@ -386,8 +395,9 @@ save(m.sims[, !ii.predict],
 varimp <- makeVarSummary(m.sims)
 knitr::kable(varimp, digits=4)
 
-path <- file.path(mdPath("model_outputs"), "rpcarbon_varimp.csv")
-write.csv(varimp, file = path, row.names = FALSE)
+write.csv(varimp, 
+          file = here::here("model_outputs", "rpcarbon_varimp.csv"),
+          row.names = FALSE)
 
 ```
 
@@ -555,7 +565,7 @@ ggplot(data = x) +
               breaks = c("O", "R", "S"),
               labels = c("open", "rough", "smooth")) +
   
-  labs(x = "Fire frequency", y = "%RPC") +
+  labs(x = "Fire frequency (number of fires)", y = "%RPC") +
   
   facet_grid(depth ~ regionCode)
 
@@ -586,7 +596,7 @@ dat <- mutate(dat,
 # summarize mean differences
 dat <- dat %>% 
   group_by(regionCode, depth, microsite) %>% 
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # arrange cols a bit better
 dat <- select(dat, regionCode, depth, microsite,
@@ -620,7 +630,7 @@ dat <- dat %>%
 # summarize mean differences (results in single row data frame)
 deltas <- dat %>%
   group_by(depth) %>%
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(IW_WC, IW_WW, WC_WW), funs(mean, lwr, upr))
 
 # munge into a more compact format
 deltas <- deltas %>%
@@ -662,7 +672,7 @@ dat <- dat %>%
 
 # summarize differences
 deltas <- dat %>% 
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # arrange cols
 deltas <- deltas %>%
@@ -701,7 +711,7 @@ dat <- mutate(dat,
 # summarize mean differences (results in single row data frame)
 deltas <- dat %>% 
   group_by(depth) %>%
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # munge into a more compact format
 deltas <- deltas %>%
@@ -716,4 +726,90 @@ knitr::kable(deltas, digits=2)
 
 ```
 
+
+## Separate model to estimate ratio of %RPC to %total Carbon
+
+```{r}
+
+modelTxt <- "model {
+  for (i in 1:N) {
+    for (j in 1:Ndigest) {
+      RPC[i, j] ~ dt(ytrue[i], sd.digest^(-2), nu)
+    }
+    
+    prpc[i] <- ytrue[i] / Ctotal[i]
+
+    ytrue[i] ~ dnorm(0, 1e-3)
+  }
+  
+  sd.digest ~ dunif(0, 10)
+  
+  nuMinusOne ~ dexp(1 / 29.0)
+  nu <- nuMinusOne + 1
+}"
+
+
+zz <- textConnection(modelTxt)
+
+model <- jags.model(zz,
+                    
+                    data = list(
+                      N = nrow(yobs),
+                      Ndigest = ncol(yobs) - 1,
+                      RPC = 10^(yobs[, -1]),
+                      Ctotal = DAT.thinned$predigestPercentC
+                    ),
+                    
+                    inits = function(...) {
+                      list(
+                        ytrue = rep(0, nrow(yobs)),
+                        sd.digest = runif(1, 0, 1),
+                        nuMinusOne = runif(1, 1, 20))
+                    }, 
+                    
+                    n.chains = 1)
+
+close(zz)
+
+update(model, 1000)
+
+sims <- coda.samples(model, 
+                     variable.names = c("nu", "prpc"), 
+                     n.iter = 10000)
+
+# Transpose so model iterations are columns. Discard shape parameter samples (col 1).
+m <- t(as.matrix(sims[[1]][, -1]))
+
+
+dat <- cbind(DAT.thinned, m) %>%
+  
+  tidyr::gather(iter, value, -c(!!colnames(DAT.thinned))) %>%
+  
+  group_by(regionCode, depth, microsite, firefreq) %>%
+  
+  summarize(lwr = lwr(value),
+            upr = upr(value),
+            mean = mean(value))
+
+
+ggplot(data = dat) +
+  geom_errorbar(aes(x = firefreq, group = microsite, ymin = lwr, ymax = upr),
+                width = 0.5,
+                position = position_dodge(width = 0.7)) +
+  
+  geom_point(aes(x = firefreq, y = mean, shape = microsite), 
+             size = 3,
+             position = position_dodge(width = 0.7)) +
+  
+  scale_shape(name = "micro-site", 
+              breaks = c("O", "R", "S"),
+              labels = c("open", "rough", "smooth")) +
+  
+  labs(x = "Fire frequency (number of fires)", 
+       y = expression("Ratio %RPC to %"*C[Tot])) +
+  
+  facet_grid(depth ~ regionCode)
+
+
+```
 

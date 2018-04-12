@@ -11,7 +11,7 @@ output:
 
 knitr::opts_chunk$set(echo = TRUE)
 
-library(mxbutils)
+library(here)
 
 library(dplyr)
 library(ggplot2)
@@ -36,23 +36,32 @@ t <- theme_bw() +
 
 theme_set(t)
 
+
+load_from <- function(.path) {
+  load(.path)
+  obs <- ls(all.names = FALSE)
+  if (length(obs) == 1) get(obs[1], inherits = FALSE)
+  else if (length(obs) > 1) mget(obs, inherits = FALSE)
+  else NULL
+}
+
 ```
 
 ```{r}
 
-DAT <- loadFrom(mdPath("data/firefreq_totalc.RData"))
+DAT <- load_from( here::here("data", "firefreq_totalc.RData") )
 
 if (!RUN.MODEL) {
-  path <- mdPath("model_outputs")
+  path <- here::here("model_outputs")
   
   # Load model predictions from earlier run
   # (if more than 1 file take the last which should be most recent)
   f <- tail( dir(path, pattern="^init_model_predictions.*RData$", full.names = TRUE), 1)
-  M.predicted <- loadFrom(f)
+  M.predicted <- load_from(f)
 
   # Load model parameter samples
   f <- tail( dir(path, pattern="^init_model_parameters.*RData$", full.names = TRUE), 1)
-  m.sims <- loadFrom(f)
+  m.sims <- load_from(f)
 }
 
 ```
@@ -284,10 +293,10 @@ M.predicted <- cbind(DAT.predict, M.predicted)
 # run the model everytime we've cleared out the workspace.
 #
 time <- format(Sys.time(), "%Y-%m-%d-%H-%M")
-path <- mdPath("model_outputs")
+path <- "model_outputs"
 
 save(M.predicted, 
-     file = paste0(file.path(path, "init_model_predictions_"), time, ".RData"))
+     file = here::here(path, paste0("init_model_predictions_", time, ".RData")))
 
 # Separately save the matrix of samples for other variables.
 # We change 'beta' and 'ind' column names to names of predictors in X
@@ -304,7 +313,7 @@ colnames(m.sims)[ii.ind] <- paste("ind", colnames(X), sep="_")
 colnames(m.sims) <- str_replace_all(colnames(m.sims), "\\[|\\(|\\]|\\)", "")
 
 save(m.sims[, !ii.predict],
-     file = paste0(file.path(path, "init_model_parameters_"), time, ".RData"))
+     file = here::here(path, paste0("init_model_parameters_", time, ".RData")))
 
 ```
 
@@ -316,8 +325,10 @@ save(m.sims[, !ii.predict],
 # Generate summary of percent inclusion and coefficient values for predictors
 varimp <- makeVarSummary(m.sims)
 knitr::kable(varimp, digits=4)
-path <- file.path(mdPath("model_outputs"), "initcarbon_varimp.csv")
-write.csv(varimp, file = path, row.names = FALSE)
+
+write.csv(varimp, 
+          file = here::here("model_outputs", "initcarbon_varimp.csv"), 
+          row.names = FALSE)
 
 ```
 
@@ -489,7 +500,7 @@ ggplot(data = x) +
               breaks = c("O", "R", "S"),
               labels = c("open", "rough", "smooth")) +
   
-  labs(x = "Fire frequency", y = expression("%"*C[Tot])) +
+  labs(x = "Fire frequency (number of fires)", y = expression("%"*C[Tot])) +
   
   facet_grid(depth ~ regionCode)
 
@@ -520,7 +531,7 @@ dat <- mutate(dat,
 # summarize mean differences
 dat <- dat %>% 
   group_by(regionCode, depth, microsite) %>% 
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # arrange cols a bit better
 dat <- select(dat, regionCode, depth, microsite,
@@ -555,7 +566,7 @@ dat <- dat %>%
 # summarize mean differences (results in single row data frame)
 deltas <- dat %>%
   group_by(depth) %>%
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(IW_WC, IW_WW, WC_WW), funs(mean, lwr, upr))
 
 # munge into a more compact format
 deltas <- deltas %>%
@@ -597,7 +608,7 @@ dat <- dat %>%
 
 # summarize differences
 deltas <- dat %>% 
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # arrange cols
 deltas <- deltas %>%
@@ -636,7 +647,7 @@ dat <- mutate(dat,
 # summarize mean differences (results in single row data frame)
 deltas <- dat %>% 
   group_by(depth) %>%
-  summarize_each(funs(mean, lwr, upr), 8:10)
+  summarize_at(vars(ff2_1, ff4_1, ff4_2), funs(mean, lwr, upr))
 
 # munge into a more compact format
 deltas <- deltas %>%

@@ -50,6 +50,10 @@ load_from <- function(.path) {
 ```
 
 
+## Note on depth categories
+
+For the published paper depth classes are referred to as 0-5cm and 5-15cm. However, in the data and analyses here the second class was labelled as 6-13cm so re-labelling is done when creating graphs with ggplot.
+
 ```{r}
 
 DAT <- load_from( here::here("data", "firefreq_rpc.RData") )
@@ -304,87 +308,88 @@ modelTxt <- "
   }
 "
 
-zz <- textConnection(modelTxt)
-
-model <- jags.model(zz, 
-                    
-                    data=list(yobs = yobs, 
-                              X = X,
-                              X.constraints = X.constraints,
-                              N=nrow(yobs), 
-                              Ndigest=ncol(yobs),
-                              Nterms = Nterms,
-                              X.predict = X.predict,
-                              Npredict = nrow(X.predict)),
-                    
-                    inits = function(...) {
-                      list(
-                        ytrue = rep(0, nrow(yobs)),
-                        sd.digest = runif(1, 0, 1),
-                        nuMinusOne = runif(1, 1, 20),
-                        betaDash = runif(Nterms, -1, 1), 
-                        sigma = runif(1, 0.1, 10),
-                        sigma.ind = runif(1, 0.1, 10),
-                        p.ind = runif(1, 0.25, 0.75),
-                        indDash = rep(0, Nterms),
-                        ypredict = rep(0, nrow(X.predict)) )
+if (RUN.MODEL) {
+  zz <- textConnection(modelTxt)
+  
+  model <- jags.model(zz, 
+                      
+                      data=list(yobs = yobs, 
+                                X = X,
+                                X.constraints = X.constraints,
+                                N=nrow(yobs), 
+                                Ndigest=ncol(yobs),
+                                Nterms = Nterms,
+                                X.predict = X.predict,
+                                Npredict = nrow(X.predict)),
+                      
+                      inits = function(...) {
+                        list(
+                          ytrue = rep(0, nrow(yobs)),
+                          sd.digest = runif(1, 0, 1),
+                          nuMinusOne = runif(1, 1, 20),
+                          betaDash = runif(Nterms, -1, 1), 
+                          sigma = runif(1, 0.1, 10),
+                          sigma.ind = runif(1, 0.1, 10),
+                          p.ind = runif(1, 0.25, 0.75),
+                          indDash = rep(0, Nterms),
+                          ypredict = rep(0, nrow(X.predict)) )
                       }, 
-                    
-                    n.chains = 1)
-
-close(zz)
-
-update(model, 50000)
-
-sims <- coda.samples(model, 
-                     c("ytrue", "nu", "sd.digest", "beta", "ind", "p.ind", "ypredict"), 
-                     n.iter=100000, 
-                     thin=10)
-
-
-# Extract two matrices from the MCMC output object:
-# - matrix of model parameter samples
-# - matrix of posterior predictions joined to prediction case data
-#
-m.sims <- as.matrix(sims[[1]])
-rm(sims)
-gc()
-ii.predict <- str_detect(colnames(m.sims), "^ypredict")
-M.predicted <- m.sims[, ii.predict]
-
-
-# Transpose the matrix of predictions and join it to the
-# predict case data
-M.predicted <- t(M.predicted)
-M.predicted <- cbind(DAT.predict, M.predicted)
-
-
-# Save this matrix to the outputs dir so that we don't have to
-# run the model everytime we've cleared out the workspace.
-#
-time <- format(Sys.time(), "%Y-%m-%d-%H-%M")
-path <- "model_outputs"
-
-save(M.predicted, 
-     file = here::here(path, paste0("rpc_model_predictions_", time, ".RData")))
-
-# Separately save the matrix of samples for other variables.
-# We change 'beta' and 'ind' column names to names of predictors in X
-# to make subsequent use easier, and get rid of pesky square brackets 
-# in the remaining column names.
-
-ii.beta <- str_detect(colnames(m.sims), "^beta\\[")
-colnames(m.sims)[ii.beta] <- colnames(X)
-
-ii.ind <- str_detect(colnames(m.sims), "^ind\\[")
-colnames(m.sims)[ii.ind] <- paste("ind", colnames(X), sep="_")
-
-# purge brackets from column names
-colnames(m.sims) <- str_replace_all(colnames(m.sims), "\\[|\\(|\\]|\\)", "")
-
-save(m.sims[, !ii.predict],
-     file = here::here(path, paste0("rpc_model_parameters_", time, ".RData")))
-
+                      
+                      n.chains = 1)
+  
+  close(zz)
+  
+  update(model, 50000)
+  
+  sims <- coda.samples(model, 
+                       c("ytrue", "nu", "sd.digest", "beta", "ind", "p.ind", "ypredict"), 
+                       n.iter=100000, 
+                       thin=10)
+  
+  
+  # Extract two matrices from the MCMC output object:
+  # - matrix of model parameter samples
+  # - matrix of posterior predictions joined to prediction case data
+  #
+  m.sims <- as.matrix(sims[[1]])
+  rm(sims)
+  gc()
+  ii.predict <- str_detect(colnames(m.sims), "^ypredict")
+  M.predicted <- m.sims[, ii.predict]
+  
+  
+  # Transpose the matrix of predictions and join it to the
+  # predict case data
+  M.predicted <- t(M.predicted)
+  M.predicted <- cbind(DAT.predict, M.predicted)
+  
+  
+  # Save this matrix to the outputs dir so that we don't have to
+  # run the model everytime we've cleared out the workspace.
+  #
+  time <- format(Sys.time(), "%Y-%m-%d-%H-%M")
+  path <- "model_outputs"
+  
+  save(M.predicted, 
+       file = here::here(path, paste0("rpc_model_predictions_", time, ".RData")))
+  
+  # Separately save the matrix of samples for other variables.
+  # We change 'beta' and 'ind' column names to names of predictors in X
+  # to make subsequent use easier, and get rid of pesky square brackets 
+  # in the remaining column names.
+  
+  ii.beta <- str_detect(colnames(m.sims), "^beta\\[")
+  colnames(m.sims)[ii.beta] <- colnames(X)
+  
+  ii.ind <- str_detect(colnames(m.sims), "^ind\\[")
+  colnames(m.sims)[ii.ind] <- paste("ind", colnames(X), sep="_")
+  
+  # purge brackets from column names
+  colnames(m.sims) <- str_replace_all(colnames(m.sims), "\\[|\\(|\\]|\\)", "")
+  
+  save(m.sims[, !ii.predict],
+       file = here::here(path, paste0("rpc_model_parameters_", time, ".RData")))
+}
 ```
 
 
@@ -550,6 +555,8 @@ knitr::kable(x, digits=2)
 
 ## Graph of means and intervals corresponding to above full-breakdown table
 
+This is the graph for the published paper. Note that depth labels have been changed to '0-5cm' and '5-15cm' in this graph to address reviewer comments for the paper.
+
 ```{r}
 
 ggplot(data = x) +
@@ -567,7 +574,8 @@ ggplot(data = x) +
   
   labs(x = "Fire frequency (number of fires)", y = "%RPC") +
   
-  facet_grid(depth ~ regionCode)
+  facet_grid(depth ~ regionCode,
+             labeller = labeller(.rows = c('0-5cm' = '0-5cm', '6-15cm' = '5-15cm')))
 
 ```
 
@@ -729,6 +737,8 @@ knitr::kable(deltas, digits=2)
 
 ## Separate model to estimate ratio of %RPC to %total Carbon
 
+Graph for appendix B of paper. Note that depth labels have been changed to '0-5cm' and '5-15cm' in this graph to address reviewer comments for the paper.
+
 ```{r}
 
 modelTxt <- "model {
@@ -808,7 +818,8 @@ ggplot(data = dat) +
   labs(x = "Fire frequency (number of fires)", 
        y = expression("Ratio %RPC to %"*C[Tot])) +
   
-  facet_grid(depth ~ regionCode)
+  facet_grid(depth ~ regionCode,
+             labeller = labeller(.rows = c('0-5cm' = "0-5cm", '6-13cm' = "5-15cm")))
 
 
 ```

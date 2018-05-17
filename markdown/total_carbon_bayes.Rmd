@@ -1,5 +1,5 @@
 ---
-title: "Fire frequency - initial carbon"
+title: "Fire frequency - total carbon"
 output:
   word_document:
     fig_height: 6
@@ -46,6 +46,11 @@ load_from <- function(.path) {
 }
 
 ```
+
+
+## Note on depth categories
+
+For the published paper depth classes are referred to as 0-5cm and 5-15cm. However, in the data and analyses here the second class was labelled as 6-15cm so re-labelling is done when creating graphs with ggplot.
 
 ```{r}
 
@@ -485,6 +490,8 @@ knitr::kable(x, digits=2)
 
 ## Graph of means and intervals corresponding to above full-breakdown table
 
+This is the graph for the published paper. Note that depth labels have been changed to '0-5cm' and '5-15cm' in this graph to address reviewer comments for the paper.
+
 ```{r}
 
 ggplot(data = x) +
@@ -502,7 +509,8 @@ ggplot(data = x) +
   
   labs(x = "Fire frequency (number of fires)", y = expression("%"*C[Tot])) +
   
-  facet_grid(depth ~ regionCode)
+  facet_grid(depth ~ regionCode, 
+             labeller = labeller(.rows = c('0-5cm' = '0-5cm', '6-15cm' = '5-15cm')))
 
 ```
 
